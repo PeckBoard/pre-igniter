@@ -2,14 +2,14 @@
 // to its handler. The wasm export functions themselves live in `index.ts`.
 
 import { allow, cancel, skip } from "./verdict";
-import { handleMessageBefore, preIgniteResult } from "./ignite";
+import { handleMessageBefore, preHatchResult } from "./hatch";
 
 /// Dispatch a hook call to the right handler, returning a verdict JSON string.
 export function dispatch(hook: string, payload: any): string {
   switch (hook) {
     case "session.message.before": {
       const v = handleMessageBefore(payload);
-      return v.verdict === "cancel" ? cancel(v.reason ?? "pre-igniting") : skip();
+      return v.verdict === "cancel" ? cancel(v.reason ?? "pre-hatching", v.data) : skip();
     }
     case "mcp.tool.invoke":
       return handleInvoke(payload);
@@ -25,8 +25,8 @@ function handleInvoke(payload: any): string {
     return cancel("malformed invoke payload: not an object");
   }
   const tool: string = typeof payload.tool === "string" ? payload.tool : "";
-  if (tool !== "pre_ignite_result") {
-    return cancel(`pre-igniter plugin does not provide tool '${tool}'`);
+  if (tool !== "pre_hatch_result") {
+    return cancel(`pre-hatcher plugin does not provide tool '${tool}'`);
   }
   const args = payload.arguments ?? {};
   const callerSessionId: string =
@@ -34,7 +34,7 @@ function handleInvoke(payload: any): string {
 
   let value: any;
   try {
-    value = preIgniteResult(args, callerSessionId);
+    value = preHatchResult(args, callerSessionId);
   } catch (e) {
     value = { error: e instanceof Error ? e.message : String(e) };
   }

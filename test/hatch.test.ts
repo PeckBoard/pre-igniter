@@ -7,7 +7,8 @@ import {
   researchPrompt,
   shouldIntercept,
   userEventData,
-} from "../src/ignite";
+} from "../src/hatch";
+import { cancel } from "../src/verdict";
 
 describe("baseModel", () => {
   it("strips provider prefix and account suffix", () => {
@@ -73,9 +74,21 @@ describe("userEventData", () => {
   it("carries the rendered text plus the original for the expandable view", () => {
     const d = userEventData("enriched text", "original text", true, "temp-1");
     expect(d.text).toBe("enriched text");
-    expect(d.pre_ignite.original).toBe("original text");
-    expect(d.pre_ignite.enriched).toBe(true);
-    expect(d.pre_ignite.temp_session_id).toBe("temp-1");
+    expect(d.pre_hatch.original).toBe("original text");
+    expect(d.pre_hatch.enriched).toBe(true);
+    expect(d.pre_hatch.temp_session_id).toBe("temp-1");
+  });
+});
+
+describe("cancel", () => {
+  it("carries structured data when given, and omits it when not", () => {
+    const bare = JSON.parse(cancel("pre-hatching"));
+    expect(bare).toEqual({ verdict: "cancel", reason: "pre-hatching" });
+    const withData = JSON.parse(
+      cancel("pre-hatching", { temp_session_id: "temp-1", model: "claude:claude-haiku-4-5" }),
+    );
+    expect(withData.data.temp_session_id).toBe("temp-1");
+    expect(withData.data.model).toBe("claude:claude-haiku-4-5");
   });
 });
 
@@ -85,6 +98,6 @@ describe("researchPrompt", () => {
     expect(p).toContain("---BEGIN USER MESSAGE---");
     expect(p).toContain("what does the orchestrator do?");
     expect(p).toContain("---END USER MESSAGE---");
-    expect(p).toContain("pre_ignite_result");
+    expect(p).toContain("pre_hatch_result");
   });
 });

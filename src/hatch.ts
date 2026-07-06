@@ -1,19 +1,21 @@
-// The pre-ignite flow. Pure decision/formatting helpers are exported for
+// The pre-hatch flow. Pure decision/formatting helpers are exported for
 // vitest; everything touching host functions stays in the two handlers.
 //
 // Flow:
 //  1. `session.message.before` fires for an interactive chat message. If the
-//     session's provider has a cheaper model and no pre-ignite is already
-//     pending, create a temp research session on that model, dispatch the
-//     research prompt, and Cancel the hook — core parks the message as a
-//     `pre-ignite` placeholder event.
-//  2. The temp agent researches the repo and calls the `pre_ignite_result`
+//     session's provider has a cheaper model (or the user picked an override
+//     in Settings) and no pre-hatch is already pending, create a temp
+//     research session on that model, dispatch the research prompt, and
+//     Cancel the hook — core parks the message as a `pre-hatch` placeholder
+//     event. The cancel verdict carries `{temp_session_id, model}` so the UI
+//     can stream the research session's actions into the parked bubble.
+//  2. The temp agent researches the repo and calls the `pre_hatch_result`
 //     MCP tool: `pass` delivers the original message, `enrich` delivers the
 //     context-enriched message, `ask` raises ONE clarifying question on the
 //     chat session (the answer redirects back to the temp session, which then
 //     finishes with pass/enrich).
 //  3. Delivery goes through `peckboard_deliver_message`, which persists the
-//     final `user` event (carrying `pre_ignite: {original, enriched}` so the
+//     final `user` event (carrying `pre_hatch: {original, enriched}` so the
 //     UI swaps the placeholder for it), broadcasts, and resumes the chat.
 
 import {
@@ -36,8 +38,8 @@ export const PENDING_COLLECTION = "pending";
 export const BY_TEMP_COLLECTION = "by_temp";
 
 /// A pending record older than this is treated as dead (temp agent crashed or
-/// never reported) — a fresh message may pre-ignite again. There is no
-/// user-facing timeout: an in-flight pre-ignite waits as long as it takes.
+/// never reported) — a fresh message may pre-hatch again. There is no
+/// user-facing timeout: an in-flight pre-hatch waits as long as it takes.
 export const STALE_MS = 30 * 60 * 1000;
 
 // ── Pure helpers (vitest-covered) ──────────────────────────────────────
@@ -51,8 +53,9 @@ export function baseModel(id: string): string {
 }
 
 /// Whether a message should be intercepted at all. `cheapModel` comes from
-/// core (the session provider's cheapest priced model, or empty when the
-/// provider prices nothing).
+/// core (the user's Settings override when set, otherwise the session
+/// provider's cheapest priced model, or empty when the provider prices
+/// nothing).
 export function shouldIntercept(
   text: string,
   model: string,
@@ -85,7 +88,7 @@ export function finalEnriched(original: string, message: string): string {
 }
 
 /// The `user` event data persisted on delivery. `text` is what the UI renders
-/// in place of the user's message; `pre_ignite` carries the original for the
+/// in place of the user's message; `pre_hatch` carries the original for the
 /// expandable "original message" view and links the temp session for audit.
 export function userEventData(
   text: string,
@@ -95,7 +98,7 @@ export function userEventData(
 ): any {
   return {
     text,
-    pre_ignite: {
+    pre_hatch: {
       original,
       enriched,
       temp_session_id: tempSessionId,
@@ -106,10 +109,10 @@ export function userEventData(
 /// The research prompt the temp session runs on the cheap model.
 export function researchPrompt(text: string): string {
   return [
-    "You are the PRE-IGNITER for a chat session: a fast, cheap context-gatherer",
+    "You are the PRE-HATCHER for a chat session: a fast, cheap context-gatherer",
     "that runs BEFORE the user's message reaches the main (expensive) model.",
     "Decide whether the message needs repository context, gather the minimum",
-    "that genuinely helps, and hand off by calling the `pre_ignite_result` MCP",
+    "that genuinely helps, and hand off by calling the `pre_hatch_result` MCP",
     "tool. Your text output is discarded — only the tool call matters.",
     "",
     "The user's message is between the markers:",
@@ -121,28 +124,34 @@ export function researchPrompt(text: string): string {
     "- Work fast and cheap: use file_outline / search_files / targeted",
     "  read_file windows. Never run commands or tests; never edit files.",
     '- If the message is conversational, self-contained, or you cannot add',
-    '  real value: call pre_ignite_result with {"action":"pass"} immediately.',
-    "- If repository context would help the main model: call pre_ignite_result",
+    '  real value: call pre_hatch_result with {"action":"pass"} immediately.',
+    "- If repository context would help the main model: call pre_hatch_result",
     '  with {"action":"enrich","message":<the FULL message to send>}. The',
     "  enriched message MUST start with the original user message VERBATIM,",
     '  followed by a "## Context (pre-gathered)" section: relevant file paths',
     "  (with line numbers), key functions/types, and constraints discovered.",
     "  Keep the context under ~400 words — distill, never dump.",
     "- Only if the request is genuinely ambiguous AND the ambiguity changes",
-    "  what the main model would do: call pre_ignite_result with",
+    "  what the main model would do: call pre_hatch_result with",
     '  {"action":"ask","question":"...","options":[...]}. ONE short question,',
     "  multiple-choice when possible. The user's answer arrives as your next",
     "  message; then finish with enrich or pass.",
-    "- Call pre_ignite_result EXACTLY once per turn, as your final action.",
+    "- Call pre_hatch_result EXACTLY once per turn, as your final action.",
   ].join("\n");
 }
 
 // ── Handlers (host-touching) ───────────────────────────────────────────
 
 /// `session.message.before`: decide whether to take ownership of the turn.
-/// Returns a verdict object; `lib.ts` serializes it. Any internal failure
-/// falls back to `{skip}` so the user's message always proceeds.
-export function handleMessageBefore(payload: any): { verdict: string; reason?: string } {
+/// Returns a verdict object; `lib.ts` serializes it. A cancel carries `data`
+/// (temp session id + model) that core copies onto the `pre-hatch`
+/// placeholder event so the UI can follow the research live. Any internal
+/// failure falls back to `{skip}` so the user's message always proceeds.
+export function handleMessageBefore(payload: any): {
+  verdict: string;
+  reason?: string;
+  data?: any;
+} {
   try {
     const sessionId = asStr(payload?.session_id);
     const text = asStr(payload?.text);
@@ -152,7 +161,7 @@ export function handleMessageBefore(payload: any): { verdict: string; reason?: s
       return { verdict: "skip" };
     }
 
-    // One pre-ignite per chat session at a time; a stale record (dead temp
+    // One pre-hatch per chat session at a time; a stale record (dead temp
     // agent) is replaced rather than blocking enrichment forever.
     const pending = tryGet(PENDING_COLLECTION, sessionId);
     if (pending && !isStale(pending, nowMs())) {
@@ -160,11 +169,11 @@ export function handleMessageBefore(payload: any): { verdict: string; reason?: s
     }
 
     const created = createSession({
-      name: `Pre-igniter: ${truncate(text, 40)}`,
+      name: `Pre-hatcher: ${truncate(text, 40)}`,
       model: cheapModel,
       effort: "low",
       is_expert: true,
-      expert_kind: "pre-igniter",
+      expert_kind: "pre-hatcher",
     });
     const tempId = created?.session?.id;
     if (typeof tempId !== "string" || tempId === "") {
@@ -187,7 +196,8 @@ export function handleMessageBefore(payload: any): { verdict: string; reason?: s
     dispatchCapture({ session_id: tempId, prompt: researchPrompt(text) });
     return {
       verdict: "cancel",
-      reason: `pre-igniting: gathering context on ${cheapModel} before dispatch`,
+      reason: `pre-hatching: gathering context on ${cheapModel} before dispatch`,
+      data: { temp_session_id: tempId, model: cheapModel },
     };
   } catch (_e) {
     // Enrichment is best-effort; a failure must never eat the user's message.
@@ -195,12 +205,12 @@ export function handleMessageBefore(payload: any): { verdict: string; reason?: s
   }
 }
 
-/// The `pre_ignite_result` MCP tool, called by the temp research agent.
-export function preIgniteResult(args: any, callerSessionId: string): any {
+/// The `pre_hatch_result` MCP tool, called by the temp research agent.
+export function preHatchResult(args: any, callerSessionId: string): any {
   const link = tryGet(BY_TEMP_COLLECTION, callerSessionId);
   if (!link) {
     throw new Error(
-      "no pre-ignite pending for this session (already delivered, or this is not a pre-igniter research session)",
+      "no pre-hatch pending for this session (already delivered, or this is not a pre-hatcher research session)",
     );
   }
   const chatId = asStr(link.chat_session_id);
@@ -253,7 +263,7 @@ export function preIgniteResult(args: any, callerSessionId: string): any {
       status: "waiting_for_user",
       note:
         "The user's answer will arrive as your next message; then call " +
-        "pre_ignite_result again with enrich or pass.",
+        "pre_hatch_result again with enrich or pass.",
     };
   }
 

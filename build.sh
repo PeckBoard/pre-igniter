@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the Peckboard pre-igniter plugin to a WASM module via the Extism js-pdk.
+# Build the Peckboard pre-hatcher plugin to a WASM module via the Extism js-pdk.
 # esbuild bundles src/index.ts -> dist/index.js, then extism-js compiles it
 # to dist/plugin.wasm.
 #

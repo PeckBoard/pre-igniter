@@ -51,7 +51,7 @@ export function deliverMessage(input: {
 }
 
 /// Emit a question card on `session_id`. `redirect_session_id` makes the
-/// user's answer resume THAT session instead of the asker — the pre-igniter
+/// user's answer resume THAT session instead of the asker — the pre-hatcher
 /// asks on the chat session and receives the answer on its temp session.
 export function askUser(input: {
   session_id: string;

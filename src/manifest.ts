@@ -3,9 +3,9 @@
 // require.
 
 const DESCRIPTION =
-  "Pre-igniter: pre-warms chat messages before they reach the main model. A cheaper model (the session provider's lowest-priced one) gathers repository context in a temp session, optionally asks one clarifying question, then delivers the enriched — or untouched — message to the chat.";
-const VERSION = "0.1.1";
-const REPOSITORY = "https://github.com/PeckBoard/pre-igniter";
+  "Pre-hatcher: pre-warms chat messages before they reach the main model. A cheaper model (the session provider's lowest-priced one, or the model picked in Settings) gathers repository context in a temp session, optionally asks one clarifying question, then delivers the enriched — or untouched — message to the chat.";
+const VERSION = "0.2.0";
+const REPOSITORY = "https://github.com/PeckBoard/pre-hatcher";
 
 /// Build the manifest JSON string. `index.ts`'s `manifest()` export wraps this.
 export function manifestJson(): string {
@@ -18,10 +18,10 @@ export function manifestJson(): string {
 
     mcp_tools: [
       {
-        name: "pre_ignite_result",
-        title: "Report pre-ignite result",
+        name: "pre_hatch_result",
+        title: "Report pre-hatch result",
         description:
-          "PRE-IGNITER RESEARCH SESSIONS ONLY: report the outcome of pre-warming a chat message. action=pass sends the user's message unchanged; action=enrich sends `message` (the original message verbatim plus a distilled context section) in its place; action=ask raises ONE clarifying question to the user — their answer arrives as your next message, then finish with enrich or pass. Call exactly once per turn, as your final action.",
+          "PRE-HATCHER RESEARCH SESSIONS ONLY: report the outcome of pre-warming a chat message. action=pass sends the user's message unchanged; action=enrich sends `message` (the original message verbatim plus a distilled context section) in its place; action=ask raises ONE clarifying question to the user — their answer arrives as your next message, then finish with enrich or pass. Call exactly once per turn, as your final action.",
         input_schema: {
           type: "object",
           properties: {

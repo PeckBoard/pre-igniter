@@ -1,8 +1,8 @@
 {
-  "name": "peckboard-pre-igniter-plugin",
-  "version": "0.1.1",
+  "name": "peckboard-pre-hatcher-plugin",
+  "version": "0.2.0",
   "private": true,
-  "description": "Peckboard pre-igniter WASM plugin (Extism js-pdk / TypeScript)",
+  "description": "Peckboard pre-hatcher WASM plugin (Extism js-pdk / TypeScript)",
   "scripts": {
     "bundle": "node esbuild.js",
     "build": "node esbuild.js && extism-js dist/index.js -i src/index.d.ts -o dist/plugin.wasm",
