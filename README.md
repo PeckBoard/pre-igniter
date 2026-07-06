@@ -32,23 +32,31 @@ delivers the enriched — or untouched — message to the chat session.
 3. **Research** — on acceptance the temp agent reads the repo (outline/search/targeted
    reads only) and reports through the `pre_hatch_result` MCP tool:
    - `pass` — the message is fine as-is;
-   - `enrich` — send `message` instead: the original message verbatim plus a
+   - `enrich` — propose `message`: the original message verbatim plus a
      distilled `## Context (pre-gathered)` section (≤ ~400 words);
    - `ask` — raise ONE clarifying question on the chat session. The answer is
      redirected to the temp session (`redirectSessionId` on the question
      event), which then finishes with `enrich`/`pass`.
-4. **Deliver** — `peckboard_deliver_message` persists the final `user` event
+4. **Approve** — an enrich proposal is never delivered directly: the plugin
+   stores it and raises a second plugin-authored question card on the chat
+   session showing the expanded text ("Send expanded message" / "Send my
+   original message"), answer redirected to the temp session. The agent then
+   calls `finalize`; the plugin reads the user's recorded answer via
+   `peckboard_get_answer` — core is the source of truth, so the agent can
+   neither forge approval nor alter the delivered text — and delivers the
+   stored expanded message on approval, the original otherwise.
+5. **Deliver** — `peckboard_deliver_message` persists the final `user` event
    (data carries `pre_hatch: {original, enriched}` so the UI swaps the
    placeholder for the final message, original expandable), broadcasts it,
    and resumes the chat session so the main model runs on the enriched text.
 
-There is **no timeout**: an in-flight pre-hatch waits as long as the research
 There is **no timeout**: an accepted pre-hatch waits as long as the research
 takes. A pending record older than 30 minutes is treated as dead (crashed temp
 agent, or a question the user typed past — typing a new message dismisses the
 card without resuming the temp agent, leaving the parked message undelivered)
 and replaced on the next message; enrichment failures always fall back to
 sending the original message untouched.
+
 ## Hooks & permissions
 
 | Hook | Why |
@@ -56,7 +64,8 @@ sending the original message untouched.
 | `session.message.before` | Intercept chat messages pre-dispatch (scoped user-authority context). |
 | `mcp.tool.invoke` | Serve `pre_hatch_result` to the temp research agent. |
 
-Permissions: `provide_mcp_tools` (declare `pre_hatch_result`),
+(`dispatch_capture`, `deliver_message`), `ask_user` (opt-in, approval, and
+clarifying question cards, plus reading the recorded answers),
 `session_write` (create/tag the temp session), `session_dispatch`
 (`dispatch_capture`, `deliver_message`), `ask_user` (clarifying questions),
 `data_store` (pending-flow records), `user_authority` (act under the user in

@@ -1,11 +1,15 @@
 import { describe, expect, it } from "vitest";
 import {
+  APPROVE_ORIGINAL,
+  APPROVE_SEND,
   OPT_IN_NO,
   OPT_IN_YES,
   STALE_MS,
+  approvalQuestion,
   baseModel,
   finalEnriched,
   gatekeeperPrompt,
+  isApproved,
   isStale,
   researchPrompt,
   shouldIntercept,
@@ -132,5 +136,31 @@ describe("gatekeeperPrompt", () => {
     expect(p).toContain(OPT_IN_NO);
     // A decline or dismissal must deliver the original, never drop it.
     expect(p).toContain('{"action":"pass"}');
+  });
+});
+
+describe("approvalQuestion", () => {
+  it("embeds the proposal, clipped for the card", () => {
+    const q = approvalQuestion("fix the bug\n\n## Context (pre-gathered)\n- src/a.rs:1");
+    expect(q).toContain("Send");
+    expect(q).toContain("## Context (pre-gathered)");
+    const long = approvalQuestion("x".repeat(5000));
+    expect(Array.from(long).length).toBeLessThan(1400);
+    expect(long).toContain("…");
+  });
+});
+
+describe("isApproved", () => {
+  it("approves only an explicit, unrejected 'send expanded' answer", () => {
+    expect(isApproved({ status: "answered", rejected: false, answer: APPROVE_SEND })).toBe(true);
+    expect(isApproved({ status: "answered", answer: APPROVE_SEND })).toBe(true);
+  });
+
+  it("falls back to the original on decline, dismissal, or anything else", () => {
+    expect(isApproved({ status: "answered", answer: APPROVE_ORIGINAL })).toBe(false);
+    expect(isApproved({ status: "answered", rejected: true, answer: APPROVE_SEND })).toBe(false);
+    expect(isApproved({ status: "pending" })).toBe(false);
+    expect(isApproved({ status: "unknown" })).toBe(false);
+    expect(isApproved(null)).toBe(false);
   });
 });

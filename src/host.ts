@@ -63,6 +63,13 @@ export function askUser(input: {
   return hostCall("peckboard_ask_user", input);
 }
 
+/// Read the user's REAL answer to a plugin-emitted question (`token`) from
+/// the target session's event log — core is the source of truth, so an
+/// agent cannot forge an approval. Returns
+/// `{status: "pending"|"answered"|"unknown", answer?, rejected?}`.
+export function getAnswer(input: { token: string; session_id?: string }): any {
+  return hostCall("peckboard_get_answer", input);
+}
 export function storePut(input: { collection: string; key: string; data: unknown }): any {
   return hostCall("peckboard_store_put", input);
 }

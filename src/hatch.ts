@@ -19,11 +19,19 @@
 //     the original message is delivered untouched; an accept starts the
 //     research.
 //  3. The temp agent researches the repo and calls the `pre_hatch_result`
-//     MCP tool: `pass` delivers the original message, `enrich` delivers the
+//     MCP tool: `pass` delivers the original message, `enrich` PROPOSES the
 //     context-enriched message, `ask` raises ONE clarifying question on the
 //     chat session (the answer redirects back to the temp session, which then
-//     finishes with pass/enrich).
-//  4. Delivery goes through `peckboard_deliver_message`, which persists the
+//     finishes with enrich/pass).
+//  4. An enrich proposal is never delivered directly: the plugin raises a
+//     plugin-authored (no AI) approval card on the chat session showing the
+//     expanded text, answer redirected to the temp session again. The temp
+//     agent's only remaining job is to call `finalize`; the plugin reads the
+//     user's RECORDED answer via `peckboard_get_answer` (core is the source
+//     of truth — the agent cannot forge approval or alter the text) and
+//     delivers the stored expanded message on approval, the original
+//     otherwise.
+//  5. Delivery goes through `peckboard_deliver_message`, which persists the
 //     final `user` event (carrying `pre_hatch: {original, enriched}` so the
 //     UI swaps the placeholder for it), broadcasts, and resumes the chat.
 
@@ -33,6 +41,7 @@ import {
   deliverMessage,
   dispatchCapture,
   genId,
+  getAnswer,
   nowMs,
   sessionMetaSet,
   storeDelete,
@@ -59,6 +68,12 @@ export const OPT_IN_QUESTION =
   "Expand this message with repository context before sending it to the main model?";
 export const OPT_IN_YES = "Yes, expand it";
 export const OPT_IN_NO = "No, send as-is";
+
+/// The approval card raised when the temp agent proposes an enriched
+/// message (also plugin-authored, no AI). Delivery is decided ONLY from the
+/// user's answer recorded by core — never from the agent's claim.
+export const APPROVE_SEND = "Send expanded message";
+export const APPROVE_ORIGINAL = "Send my original message";
 
 // ── Pure helpers (vitest-covered) ──────────────────────────────────────
 
@@ -164,6 +179,11 @@ export function researchPrompt(text: string): string {
     "  (with line numbers), key functions/types, and constraints discovered.",
     "  Keep the context under ~400 words — distill, never dump. Context",
     "  only — never present your findings as changes you have made yourself.",
+    "  After you call enrich, the user is asked to approve the expanded",
+    "  message; the answer arrives as your next message. Respond by calling",
+    '  pre_hatch_result with {"action":"finalize"} and NOTHING else,',
+    "  whatever the answer says — the plugin reads the user's recorded",
+    "  answer itself and delivers the approved version.",
     "- Only if the request is genuinely ambiguous AND the ambiguity changes",
     "  what the main model would do: call pre_hatch_result with",
     '  {"action":"ask","question":"...","options":[...]}. ONE short question,',
@@ -195,6 +215,31 @@ export function gatekeeperPrompt(text: string): string {
     "",
     researchPrompt(text),
   ].join("\n");
+}
+
+/// The approval question raised for a proposed enriched message (plugin-
+/// authored, no AI). The proposal is embedded, clipped for the card;
+/// delivery always uses the full stored text, never anything the card or
+/// the agent echoes back.
+export function approvalQuestion(proposed: string): string {
+  return [
+    "The pre-hatcher expanded your message with repository context. Send",
+    "the expanded version to the main model?",
+    "",
+    "---",
+    truncate(proposed, 1200),
+  ].join("\n");
+}
+
+/// Whether a `peckboard_get_answer` result is an explicit approval of the
+/// expanded message. Anything else — decline, dismissal, unknown token —
+/// falls back to delivering the original message.
+export function isApproved(got: any): boolean {
+  return (
+    got?.status === "answered" &&
+    got?.rejected !== true &&
+    got?.answer === APPROVE_SEND
+  );
 }
 
 // ── Handlers (host-touching) ───────────────────────────────────────────
@@ -304,13 +349,36 @@ export function preHatchResult(args: any, callerSessionId: string): any {
       throw new Error("`message` is required for action=enrich");
     }
     const finalText = finalEnriched(original, message);
-    deliverMessage({
-      session_id: chatId,
-      text: finalText,
-      data: userEventData(finalText, original, true, callerSessionId),
+    // Never deliver AI-generated text directly: store the proposal, raise a
+    // plugin-authored approval card on the chat session, and deliver from
+    // `finalize` based on the user's recorded answer.
+    const token = genId();
+    storePut({
+      collection: BY_TEMP_COLLECTION,
+      key: callerSessionId,
+      data: {
+        chat_session_id: chatId,
+        original_text: original,
+        proposed_text: finalText,
+        approval_token: token,
+      },
     });
-    cleanup(chatId, callerSessionId);
-    return { ok: true, delivered: "enriched" };
+    askUser({
+      session_id: chatId,
+      question: approvalQuestion(finalText),
+      options: [APPROVE_SEND, APPROVE_ORIGINAL],
+      token,
+      redirect_session_id: callerSessionId,
+    });
+    return {
+      ok: true,
+      status: "waiting_for_user",
+      note:
+        "The user is being asked to approve the expanded message; their " +
+        "answer arrives as your next message. Then call pre_hatch_result " +
+        'with {"action":"finalize"} and nothing else — the plugin reads the ' +
+        "user's recorded answer itself and delivers accordingly.",
+    };
   }
 
   if (action === "ask") {
@@ -338,7 +406,38 @@ export function preHatchResult(args: any, callerSessionId: string): any {
     };
   }
 
-  throw new Error(`unknown action '${action}' — expected pass | enrich | ask`);
+  if (action === "finalize") {
+    const token = asStr(link.approval_token);
+    const proposed = asStr(link.proposed_text);
+    if (token === "" || proposed === "") {
+      throw new Error("nothing awaiting approval — call enrich first");
+    }
+    // The verdict comes from the chat session's event log, never from the
+    // agent: it cannot forge an approval or alter the delivered text.
+    const got = getAnswer({ token, session_id: chatId });
+    if (got?.status === "pending") {
+      return {
+        ok: false,
+        status: "pending",
+        note:
+          "The user has not answered yet; end your turn and call finalize " +
+          "when the answer arrives.",
+      };
+    }
+    const approved = isApproved(got);
+    const text = approved ? proposed : original;
+    deliverMessage({
+      session_id: chatId,
+      text,
+      data: userEventData(text, original, approved, callerSessionId),
+    });
+    cleanup(chatId, callerSessionId);
+    return { ok: true, delivered: approved ? "enriched" : "original" };
+  }
+
+  throw new Error(
+    `unknown action '${action}' — expected pass | enrich | ask | finalize`,
+  );
 }
 
 function cleanup(chatId: string, tempId: string): void {

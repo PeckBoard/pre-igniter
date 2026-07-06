@@ -3,8 +3,8 @@
 // require.
 
 const DESCRIPTION =
-  "Pre-hatcher: pre-warms chat messages before they reach the main model. Each intercepted message starts with a plain opt-in question card (no AI involved) — declining sends the message unchanged; accepting has a cheaper model (the session provider's lowest-priced one, or the model picked in Settings) gather repository context in a temp session, optionally ask one clarifying question, then deliver the enriched — or untouched — message to the chat.";
-const VERSION = "0.2.2";
+  "Pre-hatcher: pre-warms chat messages before they reach the main model. Each intercepted message starts with a plain opt-in question card (no AI involved) — declining sends the message unchanged; accepting has a cheaper model (the session provider's lowest-priced one, or the model picked in Settings) gather repository context in a temp session, optionally ask one clarifying question, and propose an enriched message that is delivered only after the user approves it on a second plain question card (declining delivers the original).";
+const VERSION = "0.2.3";
 const REPOSITORY = "https://github.com/PeckBoard/pre-hatcher";
 
 /// Build the manifest JSON string. `index.ts`'s `manifest()` export wraps this.
@@ -21,13 +21,13 @@ export function manifestJson(): string {
         name: "pre_hatch_result",
         title: "Report pre-hatch result",
         description:
-          "PRE-HATCHER RESEARCH SESSIONS ONLY: report the outcome of pre-warming a chat message. action=pass sends the user's message unchanged; action=enrich sends `message` (the original message verbatim plus a distilled context section) in its place; action=ask raises ONE clarifying question to the user — their answer arrives as your next message, then finish with enrich or pass. Call exactly once per turn, as your final action.",
+          "PRE-HATCHER RESEARCH SESSIONS ONLY: report the outcome of pre-warming a chat message. action=pass sends the user's message unchanged; action=enrich PROPOSES `message` (the original message verbatim plus a distilled context section) — the user is asked to approve it, and when their answer arrives as your next message you MUST finish with action=finalize, which delivers the expanded or original message strictly from the user's recorded answer; action=ask raises ONE clarifying question to the user — their answer arrives as your next message, then continue with enrich or pass. Call exactly once per turn, as your final action.",
         input_schema: {
           type: "object",
           properties: {
             action: {
               type: "string",
-              enum: ["pass", "enrich", "ask"],
+              enum: ["pass", "enrich", "ask", "finalize"],
               description: "What to do with the pre-warmed message.",
             },
             message: {
