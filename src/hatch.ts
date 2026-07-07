@@ -174,7 +174,19 @@ export function cancelPlan(
 /// ENFORCED by core: the MCP server refuses every mutating tool call from
 /// a pre-hatcher session (see `pre_hatcher_allowed_tool_names` in
 /// `peckboard/src/service/mcp_server/schemas.rs`).
-export function researchPrompt(text: string): string {
+export function researchPrompt(text: string, history = ""): string {
+  const historyBlock =
+    history.trim() === ""
+      ? []
+      : [
+          "",
+          "The conversation so far, for context (prior turns of THIS chat,",
+          "oldest first, possibly truncated). The user's NEW message is the",
+          "one between the USER MESSAGE markers below, NOT the last line here:",
+          "---BEGIN CONVERSATION---",
+          history,
+          "---END CONVERSATION---",
+        ];
   return [
     "You are the PRE-HATCHER for a chat session: a fast, cheap, STRICTLY",
     "READ-ONLY context-gatherer that runs BEFORE the user's message reaches",
@@ -186,8 +198,9 @@ export function researchPrompt(text: string): string {
     "context, gather the minimum that genuinely helps, and hand off by",
     "calling the `pre_hatch_result` MCP tool. Your text output is discarded",
     "— only the tool call matters.",
+    ...historyBlock,
     "",
-    "The user's message is between the markers:",
+    "The user's NEW message is between the markers:",
     "---BEGIN USER MESSAGE---",
     text,
     "---END USER MESSAGE---",
@@ -199,8 +212,17 @@ export function researchPrompt(text: string): string {
     "  are forbidden, and the server refuses them from this session. Do not",
     "  attempt them.",
     "- Work fast and cheap: use file_outline / search_files / read_symbol /",
-    "  targeted read_file windows.",
-    '- If the message is conversational, self-contained, or you cannot add',
+    "  targeted read_file windows. Use the conversation above to interpret",
+    '  the new message (references like "that function" or "the same file").',
+    "- ALWAYS resolve ambiguity by ASKING. If the new message is ambiguous",
+    "  in ANY way that could change what the main model does — an unclear",
+    "  target, multiple plausible interpretations, a missing detail, and the",
+    "  conversation above does not settle it — you MUST call pre_hatch_result",
+    '  with {"action":"ask","question":"...","options":[...]} BEFORE any enrich',
+    "  or pass. ONE short question, multiple-choice when possible. The user's",
+    "  answer arrives as your next message; then finish with enrich or pass.",
+    "  Only skip asking when the request is genuinely unambiguous.",
+    "- If the message is conversational, self-contained, or you cannot add",
     '  real value: call pre_hatch_result with {"action":"pass"} immediately.',
     "- If repository context would help the main model: call pre_hatch_result",
     '  with {"action":"enrich","message":<the FULL message to send>}. The',
@@ -214,11 +236,6 @@ export function researchPrompt(text: string): string {
     '  pre_hatch_result with {"action":"finalize"} and NOTHING else,',
     "  whatever the answer says — the plugin reads the user's recorded",
     "  answer itself and delivers the approved version.",
-    "- Only if the request is genuinely ambiguous AND the ambiguity changes",
-    "  what the main model would do: call pre_hatch_result with",
-    '  {"action":"ask","question":"...","options":[...]}. ONE short question,',
-    "  multiple-choice when possible. The user's answer arrives as your next",
-    "  message; then finish with enrich or pass.",
     "- Call pre_hatch_result EXACTLY once per turn, as your final action.",
   ].join("\n");
 }
@@ -229,7 +246,7 @@ export function researchPrompt(text: string): string {
 /// (redirected here by the question's `redirectSessionId`) arrives as the
 /// next message and either starts the research or reports `pass` so the
 /// original message is delivered untouched.
-export function gatekeeperPrompt(text: string): string {
+export function gatekeeperPrompt(text: string, history = ""): string {
   return [
     "HOLD — do not start working yet. The user is being asked whether this",
     "message should be expanded with repository context, and may decline.",
@@ -243,7 +260,7 @@ export function gatekeeperPrompt(text: string): string {
     '  with {"action":"pass"} and do nothing else — the user\'s message must',
     "  never be left undelivered.",
     "",
-    researchPrompt(text),
+    researchPrompt(text, history),
   ].join("\n");
 }
 
@@ -292,6 +309,12 @@ export function handleMessageBefore(payload: any): {
     const text = asStr(payload?.text);
     const model = asStr(payload?.model);
     const cheapModel = asStr(payload?.cheap_model);
+    // The full chat transcript (prior turns) and the configurable research
+    // system prompt (a library prompt body, default "fable 5"), both
+    // resolved by core in the hook payload.
+    const history = asStr(payload?.history);
+    const systemPrompt = asStr(payload?.system_prompt);
+    const systemPromptName = asStr(payload?.system_prompt_name);
     if (sessionId === "" || !shouldIntercept(text, model, cheapModel)) {
       return { verdict: "skip" };
     }
@@ -305,13 +328,14 @@ export function handleMessageBefore(payload: any): {
     if (pending) {
       try { terminateAgent({ session_id: pending.temp_session_id }); } catch (_e) { /* best-effort */ }
     }
-
     const created = createSession({
       name: `Pre-hatcher: ${truncate(text, 40)}`,
       model: cheapModel,
       effort: "low",
       is_expert: true,
       expert_kind: "pre-hatcher",
+      ...(systemPrompt !== "" ? { system_prompt: systemPrompt } : {}),
+      ...(systemPromptName !== "" ? { system_prompt_name: systemPromptName } : {}),
     });
     const tempId = created?.session?.id;
     if (typeof tempId !== "string" || tempId === "") {
@@ -342,7 +366,7 @@ export function handleMessageBefore(payload: any): {
       key: tempId,
       data: { chat_session_id: sessionId, original_text: text },
     });
-    dispatchCapture({ session_id: tempId, prompt: gatekeeperPrompt(text) });
+    dispatchCapture({ session_id: tempId, prompt: gatekeeperPrompt(text, history) });
     return {
       verdict: "cancel",
       reason: `pre-hatch offered: expands with context gathered on ${cheapModel} if accepted`,

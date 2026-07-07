@@ -1,9 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   APPROVE_ORIGINAL,
   APPROVE_SEND,
+  BY_TEMP_COLLECTION,
   OPT_IN_NO,
   OPT_IN_YES,
+  PENDING_COLLECTION,
   STALE_MS,
   approvalQuestion,
   baseModel,
@@ -12,11 +14,58 @@ import {
   gatekeeperPrompt,
   isApproved,
   isStale,
+  preHatchResult,
   researchPrompt,
   shouldIntercept,
   userEventData,
 } from "../src/hatch";
 import { cancel } from "../src/verdict";
+
+// A fake in-memory host so the host-touching handlers can be exercised.
+// `store` mirrors the plugin data store; `calls` records the side effects we
+// assert the flow does (and, crucially, does NOT do) after it hatches.
+const h = vi.hoisted(() => ({
+  store: new Map<string, unknown>(),
+  calls: {
+    deliver: [] as any[],
+    ask: [] as any[],
+    dispatch: [] as any[],
+    answer: { status: "pending" } as any,
+  },
+}));
+
+vi.mock("../src/host", () => ({
+  storePut: vi.fn((i: any) => {
+    h.store.set(`${i.collection}:${i.key}`, i.data);
+    return {};
+  }),
+  storeGet: vi.fn((i: any) => {
+    const k = `${i.collection}:${i.key}`;
+    return { value: h.store.has(k) ? h.store.get(k) : null };
+  }),
+  storeDelete: vi.fn((i: any) => {
+    h.store.delete(`${i.collection}:${i.key}`);
+    return {};
+  }),
+  deliverMessage: vi.fn((i: any) => {
+    h.calls.deliver.push(i);
+    return {};
+  }),
+  askUser: vi.fn((i: any) => {
+    h.calls.ask.push(i);
+    return {};
+  }),
+  dispatchCapture: vi.fn((i: any) => {
+    h.calls.dispatch.push(i);
+    return {};
+  }),
+  getAnswer: vi.fn(() => h.calls.answer),
+  createSession: vi.fn(() => ({ session: { id: "temp-1" } })),
+  sessionMetaSet: vi.fn(() => ({})),
+  terminateAgent: vi.fn(() => ({})),
+  genId: vi.fn(() => "tok-1"),
+  nowMs: vi.fn(() => 1000),
+}));
 
 describe("baseModel", () => {
   it("strips provider prefix and account suffix", () => {
@@ -196,5 +245,108 @@ describe("cancelPlan", () => {
     expect(cancelPlan({ temp_session_id: "temp-1", original_text: "  " }, "temp-1")).toBe(
       "fallback",
     );
+  });
+});
+
+describe("researchPrompt with session context", () => {
+  it("embeds the full chat transcript when history is supplied", () => {
+    const history = "User: earlier question\n\nAssistant: earlier answer";
+    const p = researchPrompt("and now fix that", history);
+    expect(p).toContain("---BEGIN CONVERSATION---");
+    expect(p).toContain("earlier question");
+    expect(p).toContain("earlier answer");
+    expect(p).toContain("---END CONVERSATION---");
+    // The new message stays clearly separated from the transcript.
+    expect(p).toContain("---BEGIN USER MESSAGE---");
+    expect(p).toContain("and now fix that");
+  });
+
+  it("omits the conversation block when there is no history", () => {
+    const p = researchPrompt("standalone question");
+    expect(p).not.toContain("---BEGIN CONVERSATION---");
+  });
+
+  it("instructs the model to ALWAYS ask when the request is ambiguous", () => {
+    const p = researchPrompt("do the thing");
+    expect(p).toContain("ALWAYS resolve ambiguity by ASKING");
+    expect(p).toContain('{"action":"ask"');
+  });
+});
+
+describe("gatekeeperPrompt threads history into the research prompt", () => {
+  it("embeds the history-carrying research prompt", () => {
+    const history = "User: prior\n\nAssistant: reply";
+    const p = gatekeeperPrompt("fix that", history);
+    expect(p).toContain(researchPrompt("fix that", history));
+    expect(p).toContain("prior");
+  });
+});
+
+describe("preHatchResult stops after generating the hatched prompt", () => {
+  beforeEach(() => {
+    h.store.clear();
+    h.calls.deliver.length = 0;
+    h.calls.ask.length = 0;
+    h.calls.dispatch.length = 0;
+    h.calls.answer = { status: "pending" };
+    vi.clearAllMocks();
+  });
+
+  it("enrich proposes, finalize delivers the hatched prompt once, then the flow is over", () => {
+    // The link a live pre-hatch would have stored before the temp agent runs.
+    h.store.set(`${BY_TEMP_COLLECTION}:temp-1`, {
+      chat_session_id: "chat-1",
+      original_text: "fix the login bug",
+    });
+    h.store.set(`${PENDING_COLLECTION}:chat-1`, {
+      temp_session_id: "temp-1",
+      original_text: "fix the login bug",
+      created_ms: 1000,
+    });
+
+    // enrich: PROPOSES the expanded ("hatched") message. Nothing is delivered
+    // yet — only the approval card is raised.
+    const enriched =
+      "fix the login bug\n\n## Context (pre-gathered)\n- src/auth.rs:42";
+    const r1 = preHatchResult({ action: "enrich", message: enriched }, "temp-1");
+    expect(r1.status).toBe("waiting_for_user");
+    expect(h.calls.deliver).toHaveLength(0);
+    expect(h.calls.ask).toHaveLength(1);
+
+    // The user approves; finalize delivers the hatched prompt EXACTLY once.
+    h.calls.answer = { status: "answered", answer: APPROVE_SEND };
+    const r2 = preHatchResult({ action: "finalize" }, "temp-1");
+    expect(r2).toEqual({ ok: true, delivered: "enriched" });
+    expect(h.calls.deliver).toHaveLength(1);
+    expect(h.calls.deliver[0].text).toBe(enriched);
+
+    // STOPPED: both records cleared, and no further question or dispatch that
+    // could re-run the temp research agent.
+    expect(h.store.has(`${BY_TEMP_COLLECTION}:temp-1`)).toBe(false);
+    expect(h.store.has(`${PENDING_COLLECTION}:chat-1`)).toBe(false);
+    expect(h.calls.ask).toHaveLength(1);
+    expect(h.calls.dispatch).toHaveLength(0);
+
+    // Re-entry is refused — the pre-hatch is truly finished, not looping.
+    expect(() => preHatchResult({ action: "finalize" }, "temp-1")).toThrow();
+    expect(h.calls.deliver).toHaveLength(1);
+  });
+
+  it("pass delivers the original once and then stops", () => {
+    h.store.set(`${BY_TEMP_COLLECTION}:temp-2`, {
+      chat_session_id: "chat-2",
+      original_text: "explain the parser",
+    });
+    h.store.set(`${PENDING_COLLECTION}:chat-2`, {
+      temp_session_id: "temp-2",
+      original_text: "explain the parser",
+      created_ms: 1000,
+    });
+    const r = preHatchResult({ action: "pass" }, "temp-2");
+    expect(r).toEqual({ ok: true, delivered: "original" });
+    expect(h.calls.deliver).toHaveLength(1);
+    expect(h.calls.dispatch).toHaveLength(0);
+    expect(h.store.has(`${BY_TEMP_COLLECTION}:temp-2`)).toBe(false);
+    expect(h.store.has(`${PENDING_COLLECTION}:chat-2`)).toBe(false);
   });
 });

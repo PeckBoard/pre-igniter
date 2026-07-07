@@ -26,6 +26,8 @@ export function createSession(input: {
   effort?: string;
   is_expert?: boolean;
   expert_kind?: string;
+  system_prompt?: string;
+  system_prompt_name?: string;
 }): any {
   return hostCall("peckboard_create_session", input);
 }
